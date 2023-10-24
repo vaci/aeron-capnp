@@ -1,0 +1,21 @@
+#! /bin/sh
+
+set -eu
+
+if test $# = 0; then
+  echo trigger filetype:.capnp
+  exit 0
+fi
+
+INPUT=$1
+
+echo findProvider special:ekam-interceptor
+read INTERCEPTOR
+
+if test "$INTERCEPTOR" = ""; then
+  echo "error:  couldn't find intercept.so." >&2
+  exit 1
+fi
+
+LD_PRELOAD=$INTERCEPTOR DYLD_FORCE_FLAT_NAMESPACE= DYLD_INSERT_LIBRARIES=$INTERCEPTOR \
+capnp compile -I. $CAPNPC_FLAGS -oc++ "$INPUT" 3>&1 4<&0 >&2
