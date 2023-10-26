@@ -20,35 +20,16 @@
 namespace aeroncap {
 
 namespace _ {
-
-struct ImageReceiver {
-
-protected:
-  ImageReceiver(
-    kj::Timer& timer,
-    std::shared_ptr<::aeron::Aeron> aeron,
-    kj::StringPtr channel,
-    int32_t streamId);
-
-  ~ImageReceiver();
-
-  kj::Promise<::aeron::Image> receive();
-
-  kj::Timer& timer_;
-  std::shared_ptr<::aeron::Aeron> aeron_;
-  uint64_t subId_;
-  kj::MutexGuarded<kj::Queue<::aeron::Image>> acceptQueue_;
-};
-
+struct ImageReceiver;
+KJ_DECLARE_NON_POLYMORPHIC(ImageReceiver);
 }
 
 struct Connector
-  : _::ImageReceiver
-  , private kj::TaskSet::ErrorHandler {
+  : private kj::TaskSet::ErrorHandler {
 
   Connector(
-    kj::Timer& timer,
-    std::shared_ptr<::aeron::Aeron> aeron,
+    kj::Timer&,
+    std::shared_ptr<::aeron::Aeron>,
     kj::StringPtr channel,
     int32_t streamId);
 
@@ -61,6 +42,9 @@ private:
   void taskFailed(kj::Exception&&) override;
   kj::Promise<void> handleResponses();
 
+  std::shared_ptr<::aeron::Aeron> aeron_;
+  kj::Own<_::ImageReceiver> receiver_;
+  kj::Timer& timer_;
   kj::Canceler canceler_;
   kj::TaskSet tasks_;
   kj::String channel_;
@@ -69,16 +53,19 @@ private:
   kj::HashMap<int32_t, kj::Own<kj::PromiseFulfiller<::aeron::Image>>> fulfillers_;
 };
 
-struct Listener
-  : _::ImageReceiver {
+struct Listener {
 
   Listener(
-    kj::Timer& timer,
-    std::shared_ptr<::aeron::Aeron> aeron,
+    kj::Timer&,
+    std::shared_ptr<::aeron::Aeron>,
     kj::StringPtr channel,
     int32_t streamId);
 
   kj::Promise<kj::Own<AeronMessageStream>> accept();
+
+  std::shared_ptr<::aeron::Aeron> aeron_;
+  kj::Own<_::ImageReceiver> receiver_;
+  kj::Timer& timer_;
 };
 
 struct TwoPartyServer

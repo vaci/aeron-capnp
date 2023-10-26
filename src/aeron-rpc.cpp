@@ -15,15 +15,36 @@ namespace aeroncap {
 
 namespace _ {
 
-ImageReceiver::ImageReceiver(
-    kj::Timer& timer,
-    std::shared_ptr<::aeron::Aeron> aeron,
+struct ImageReceiver {
+
+  ImageReceiver(
+    ::aeron::Aeron& aeron,
     kj::StringPtr channel,
-    int32_t streamId)
-  : timer_{timer}
-  , aeron_{aeron} {
+    int32_t streamId);
+
+  ~ImageReceiver();
+
+  template <typename Idler>
+  kj::Promise<::aeron::Image> receive(Idler idle) {
+    auto queue = acceptQueue_.lockExclusive();
+    if (!queue->empty()) {
+      return queue->pop();
+    }
+    return idle()
+      .then([this, idle = kj::mv(idle)]{ return receive(kj::mv(idle)); });
+  }
+
+  std::shared_ptr<::aeron::Aeron> aeron_;
+  uint64_t subId_;
+  kj::MutexGuarded<kj::Queue<::aeron::Image>> acceptQueue_;
+};
+
+ImageReceiver::ImageReceiver(
+  ::aeron::Aeron& aeron,
+  kj::StringPtr channel,
+  int32_t streamId) {
   
-  subId_ = aeron_->addSubscription(
+  subId_ = aeron.addSubscription(
     channel.cStr(),
     streamId,
     [this](auto image) {
@@ -35,15 +56,6 @@ ImageReceiver::ImageReceiver(
 }
 
 ImageReceiver::~ImageReceiver() {
-}
-
-kj::Promise<::aeron::Image> _::ImageReceiver::receive() {
-  auto queue = acceptQueue_.lockExclusive();
-  if (!queue->empty()) {
-    return queue->pop();
-  }
-  return timer_.afterDelay(kj::MILLISECONDS)
-    .then([this]{ return receive(); });
 }
 
 }
@@ -105,7 +117,9 @@ Connector::Connector(
   std::shared_ptr<::aeron::Aeron> aeron,
   kj::StringPtr channel,
   int32_t streamId)
-  : ImageReceiver{timer, kj::mv(aeron), channel, streamId}
+  : aeron_{kj::mv(aeron)}
+  , receiver_{kj::heap<_::ImageReceiver>(*aeron_, channel, streamId)}
+  , timer_{timer}
   , tasks_{*this}
   , channel_{kj::str(channel)}
   , streamId_{streamId} {
@@ -119,10 +133,10 @@ Connector::~Connector() {
 }
 
 kj::Promise<void> Connector::handleResponses() {
-  return receive()
+  return receiver_->receive(idle::periodic(timer_))
     .then(
       [this](auto image) {
-	KJ_LOG(INFO, image.sourceIdentity());
+	KJ_LOG(INFO, image.sourceIdentity(), image.sessionId());
 	return readMessage(timer_, image)
 	  .then(
 	    [this, image = kj::mv(image)](auto reader) mutable {
@@ -200,14 +214,16 @@ Listener::Listener(
   std::shared_ptr<::aeron::Aeron> aeron,
   kj::StringPtr channel,
   int32_t streamId)
-  : _::ImageReceiver{timer, kj::mv(aeron), channel, streamId} {
+  : aeron_{kj::mv(aeron)}
+  , receiver_{kj::heap<_::ImageReceiver>(*aeron_, channel, streamId)}
+  , timer_{timer} {
 }
 
 kj::Promise<kj::Own<AeronMessageStream>> Listener::accept() {
-  return receive()
+  return receiver_->receive(idle::periodic(timer_))
     .then(
       [this](auto image) mutable {
-	KJ_LOG(INFO, image.sourceIdentity());
+	KJ_LOG(INFO, image.sourceIdentity(), image.sessionId());
 	return readMessage(timer_, image)
 	  .then(
 	    [this](auto reader) mutable {
@@ -269,18 +285,13 @@ struct TwoPartyServer::AcceptedConnection {
 kj::Promise<void> TwoPartyServer::accept(AeronMessageStream& connection) {
   auto stream = kj::Own<capnp::MessageStream>(&connection, kj::NullDisposer::instance);
   auto connectionState = kj::heap<AcceptedConnection>(bootstrapInterface_, kj::mv(stream));
-  return
-    connectionState->network_.onDisconnect()
-    .attach(kj::mv(connectionState));
+  return connectionState->network_.onDisconnect().attach(kj::mv(connectionState));
 }
 
 void TwoPartyServer::accept(kj::Own<AeronMessageStream> connection) {
   auto connectionState = kj::heap<AcceptedConnection>(
       bootstrapInterface_, kj::mv(connection));
-  tasks_.add(
-    connectionState->network_.onDisconnect()
-    .attach(kj::mv(connectionState))
-  );
+  tasks_.add(connectionState->network_.onDisconnect().attach(kj::mv(connectionState)));
 }
 
 kj::Promise<void> TwoPartyServer::listen(Listener& listener) {

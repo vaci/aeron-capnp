@@ -132,12 +132,11 @@ kj::Promise<kj::Maybe<kj::Own<capnp::MessageReader>>> tryReadMessage(
   auto waiter = fragmentsRead ? kj::evalLater([]{}) : idler();
   // if we read a fragment, try again immediately
 
-  return
-    waiter.then(
-      [idler = kj::mv(idler), image = kj::mv(image), options, scratchSpace, outputStream = kj::mv(outputStream)]() mutable {
-	return tryReadMessage(kj::mv(idler), kj::mv(image), options, scratchSpace, kj::mv(outputStream));
-	}
-    );
+  return waiter.then(
+    [idler = kj::mv(idler), image = kj::mv(image), options, scratchSpace, outputStream = kj::mv(outputStream)]() mutable {
+      return tryReadMessage(kj::mv(idler), kj::mv(image), options, scratchSpace, kj::mv(outputStream));
+    }
+  );
 }
 
 }
@@ -147,8 +146,7 @@ kj::Promise<kj::Own<capnp::MessageReader>> readMessage(
   ::aeron::Image image,
   capnp::ReaderOptions options) {
 
-  return
-    tryReadMessage(idle::periodic(timer, kj::NANOSECONDS), kj::mv(image), options)
+  return tryReadMessage(idle::periodic(timer, kj::NANOSECONDS), kj::mv(image), options)
     .then(
       [](auto maybeReader) {
 	auto& reader = KJ_UNWRAP_OR(maybeReader, {
