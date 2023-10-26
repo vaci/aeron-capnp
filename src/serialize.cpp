@@ -148,11 +148,8 @@ kj::Promise<kj::Own<capnp::MessageReader>> readMessage(
 
   return tryReadMessage(idle::periodic(timer, kj::NANOSECONDS), kj::mv(image), options)
     .then(
-      [](auto maybeReader) {
-	auto& reader = KJ_UNWRAP_OR(maybeReader, {
-	    kj::throwFatalException(KJ_EXCEPTION(DISCONNECTED));
-	  }
-	);
+      [](auto maybeReader) -> kj::Promise<kj::Own<capnp::MessageReader>> {
+	auto& reader = KJ_UNWRAP_OR_RETURN(maybeReader, KJ_EXCEPTION(DISCONNECTED));
 	return kj::mv(reader);
       }
     );
