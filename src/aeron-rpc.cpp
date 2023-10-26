@@ -24,14 +24,17 @@ ImageReceiver::ImageReceiver(
   , aeron_{aeron} {
   
   subId_ = aeron_->addSubscription(
-      channel.cStr(),
-      streamId,
-      [this](auto image) {
-        auto queue = acceptQueue_.lockExclusive();
-        queue->push(kj::mv(image));
-      },
-      [](auto) {}
+    channel.cStr(),
+    streamId,
+    [this](auto image) {
+      auto queue = acceptQueue_.lockExclusive();
+      queue->push(kj::mv(image));
+    },
+    [](auto) {}
   );
+}
+
+ImageReceiver::~ImageReceiver() {
 }
 
 kj::Promise<::aeron::Image> _::ImageReceiver::receive() {
@@ -39,10 +42,8 @@ kj::Promise<::aeron::Image> _::ImageReceiver::receive() {
   if (!queue->empty()) {
     return queue->pop();
   }
-  else {
-    return timer_.afterDelay(kj::MILLISECONDS)
-      .then([this]{ return receive(); });
-  }
+  return timer_.afterDelay(kj::MILLISECONDS)
+    .then([this]{ return receive(); });
 }
 
 }
@@ -50,7 +51,7 @@ kj::Promise<::aeron::Image> _::ImageReceiver::receive() {
 namespace {
 
 template <typename Idler>
-kj::Promise<void> offerMessageImpl(
+kj::Promise<void> offerMessage(
     ::aeron::ExclusivePublication& pub,
     kj::ArrayPtr<capnp::byte> bytes,
     Idler idler) {
@@ -60,7 +61,7 @@ kj::Promise<void> offerMessageImpl(
   }
   else if (err == ::aeron::ADMIN_ACTION || err == ::aeron::BACK_PRESSURED) {
     return idler().then([&pub, bytes, idler = kj::mv(idler)] {
-      return offerMessageImpl(pub, bytes, kj::mv(idler));
+      return offerMessage(pub, bytes, kj::mv(idler));
     });
   }
   else {
@@ -74,7 +75,7 @@ kj::Promise<void> offerMessage(
   capnp::MessageBuilder& mb, Idler idler) {
   auto words = capnp::messageToFlatArray(mb);
   auto bytes = words.asBytes();
-  return offerMessageImpl(pub, bytes, kj::mv(idler)).attach(kj::mv(words));
+  return offerMessage(pub, bytes, kj::mv(idler)).attach(kj::mv(words));
 }
 
 template <typename Idler>
@@ -84,11 +85,10 @@ kj::Promise<std::shared_ptr<::aeron::ExclusivePublication>> findPublication(
   if (auto pub = aeron.findExclusivePublication(pubId)) {
     return pub;
   }
-  else {
-    return idle().then([&aeron, pubId, idle = kj::mv(idle)]() mutable {
-      return findPublication(aeron, pubId, kj::mv(idle));
-    });
-  }
+
+  return idle().then([&aeron, pubId, idle = kj::mv(idle)]() mutable {
+    return findPublication(aeron, pubId, kj::mv(idle));
+  });
 }
 
 template <typename Idler>
@@ -105,12 +105,11 @@ Connector::Connector(
   std::shared_ptr<::aeron::Aeron> aeron,
   kj::StringPtr channel,
   int32_t streamId)
-  : ImageReceiver{timer, aeron, channel, streamId}
+  : ImageReceiver{timer, kj::mv(aeron), channel, streamId}
   , tasks_{*this}
   , channel_{kj::str(channel)}
   , streamId_{streamId} {
-
-    tasks_.add(canceler_.wrap(handleResponses()));
+  tasks_.add(canceler_.wrap(handleResponses()));
 }
 
 Connector::~Connector() {
@@ -136,7 +135,7 @@ kj::Promise<void> Connector::handleResponses() {
 		fulfillers_.erase(sessionId);
 	      }
 	      else {
-		// drop it
+		// drop it like it's hot
 		KJ_LOG(ERROR, "Received unknown ACK", sessionId);
 	      }
 	    }
@@ -167,8 +166,7 @@ void Connector::taskFailed(kj::Exception&& exc) {
 kj::Promise<kj::Own<AeronMessageStream>> Connector::connect(
     kj::StringPtr channel, int32_t streamId) {
   
-  return
-    addPublication(*aeron_, channel, streamId, idle::backoff(timer_))
+  return addPublication(*aeron_, channel, streamId, idle::backoff(timer_))
     .then(
       [this](auto pub) {
 	auto sessionId = pub->sessionId();
@@ -200,15 +198,16 @@ kj::Promise<kj::Own<AeronMessageStream>> Connector::connect(
 Listener::Listener(
   kj::Timer& timer,
   std::shared_ptr<::aeron::Aeron> aeron,
-    kj::StringPtr channel,
-    int32_t streamId)
-  : _::ImageReceiver{timer, aeron, channel, streamId} {
+  kj::StringPtr channel,
+  int32_t streamId)
+  : _::ImageReceiver{timer, kj::mv(aeron), channel, streamId} {
 }
 
 kj::Promise<kj::Own<AeronMessageStream>> Listener::accept() {
   return receive()
     .then(
       [this](auto image) mutable {
+	KJ_LOG(INFO, image.sourceIdentity());
 	return readMessage(timer_, image)
 	  .then(
 	    [this](auto reader) mutable {
@@ -243,7 +242,7 @@ kj::Promise<kj::Own<AeronMessageStream>> Listener::accept() {
 }
 
 TwoPartyServer::TwoPartyServer(
-    capnp::Capability::Client bootstrapInterface)
+  capnp::Capability::Client bootstrapInterface)
   : bootstrapInterface_{kj::mv(bootstrapInterface)}
   , tasks_{*this} {
 }
@@ -255,8 +254,8 @@ void TwoPartyServer::taskFailed(kj::Exception&& exc) {
 struct TwoPartyServer::AcceptedConnection {
 
   explicit AcceptedConnection(
-      capnp::Capability::Client bootstrapInterface,
-      kj::Own<capnp::MessageStream> connection)
+    capnp::Capability::Client bootstrapInterface,
+    kj::Own<capnp::MessageStream> connection)
     : connection_{kj::mv(connection)}
     , network_{*connection_, capnp::rpc::twoparty::Side::SERVER}
     , rpcSystem_{capnp::makeRpcServer(network_, kj::mv(bootstrapInterface))} {
@@ -268,8 +267,8 @@ struct TwoPartyServer::AcceptedConnection {
 };
 
 kj::Promise<void> TwoPartyServer::accept(AeronMessageStream& connection) {
-  auto connectionState = kj::heap<AcceptedConnection>(bootstrapInterface_,
-    kj::Own<capnp::MessageStream>(&connection, kj::NullDisposer::instance));
+  auto stream = kj::Own<capnp::MessageStream>(&connection, kj::NullDisposer::instance);
+  auto connectionState = kj::heap<AcceptedConnection>(bootstrapInterface_, kj::mv(stream));
   return
     connectionState->network_.onDisconnect()
     .attach(kj::mv(connectionState));
@@ -287,7 +286,7 @@ void TwoPartyServer::accept(kj::Own<AeronMessageStream> connection) {
 kj::Promise<void> TwoPartyServer::listen(Listener& listener) {
   return listener.accept()
     .then(
-        [this, &listener](kj::Own<AeronMessageStream> connection) mutable {
+        [this, &listener](auto connection) mutable {
           accept(kj::mv(connection));
           return listen(listener);
         }
@@ -304,9 +303,10 @@ capnp::Capability::Client TwoPartyClient::bootstrap() {
   memset(scratch.begin(), 0, scratch.size());
   capnp::MallocMessageBuilder message(scratch);
   auto vatId = message.getRoot<capnp::rpc::twoparty::VatId>();
-  vatId.setSide(network_.getSide() == capnp::rpc::twoparty::Side::CLIENT
-                ? capnp::rpc::twoparty::Side::SERVER
-                : capnp::rpc::twoparty::Side::CLIENT);
+  vatId.setSide(
+    network_.getSide() == capnp::rpc::twoparty::Side::CLIENT
+    ? capnp::rpc::twoparty::Side::SERVER
+    : capnp::rpc::twoparty::Side::CLIENT);
   return rpcSystem_.bootstrap(vatId);
 }
 

@@ -30,6 +30,8 @@ protected:
     kj::StringPtr channel,
     int32_t streamId);
 
+  ~ImageReceiver();
+
   kj::Promise<::aeron::Image> receive();
 
   kj::Timer& timer_;
@@ -64,7 +66,6 @@ private:
   kj::String channel_;
   int32_t streamId_;
 
-  // a set of fulfillers waiting for ACKs
   kj::HashMap<int32_t, kj::Own<kj::PromiseFulfiller<::aeron::Image>>> fulfillers_;
 };
 

@@ -28,12 +28,14 @@ struct AeronRpc
 
 
   bool isRunning() {
-    return running_.load();
+    auto running = running_.lockExclusive();
+    return *running;
   }
 
   static void terminationHook(void *state) {
     KJ_LOG(INFO, "Termination hook called");
-    static_cast<AeronRpc*>(state)->running_.store(false);
+    auto running = static_cast<AeronRpc*>(state)->running_.lockExclusive();
+    *running = false;
   }
 
   std::shared_ptr<::aeron::ExclusivePublication> newPublisher(int streamId) {
@@ -65,14 +67,14 @@ struct AeronRpc
 
   std::shared_ptr<::aeron::Aeron> aeron_;
 
-  std::atomic<bool> running_{true};
+  kj::MutexGuarded<bool> running_;
 
   const int count_ = 256;
   const int ttl_ = 0;
 };
 
 AeronRpc::AeronRpc() {
-  //  waitScope_.setBusyPollInterval(16);
+  //  waitScope_.setBusyPollInterval(32);
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-result"
@@ -81,9 +83,9 @@ AeronRpc::AeronRpc() {
   KJ_LOG(INFO, driverPath_);
 
   if (aeron_driver_context_init(&driverContext_)) {
-      auto errcode = aeron_errcode();
-      auto errmsg = aeron_errmsg();
-      KJ_FAIL_REQUIRE("aeron_driver_context_init", errcode, errmsg);
+    auto errcode = aeron_errcode();
+    auto errmsg = aeron_errmsg();
+    KJ_FAIL_REQUIRE("aeron_driver_context_init", errcode, errmsg);
   }
 
   aeron_driver_context_set_print_configuration(driverContext_, false);
@@ -105,16 +107,18 @@ AeronRpc::AeronRpc() {
     auto errmsg = aeron_errmsg();
     KJ_FAIL_REQUIRE("aeron_driver_start", errcode, errmsg);
   }
-
+  {
+    auto running = running_.lockExclusive();
+    *running = true;
+  }
   runner_ = kj::heap<kj::Thread>(
-      [this]{
-        while (isRunning()) {
-          auto count = aeron_driver_main_do_work(driver_);
-          aeron_driver_main_idle_strategy(driver_, count);
-        }
+    [this]{
+      while (isRunning()) {
+	auto count = aeron_driver_main_do_work(driver_);
+	aeron_driver_main_idle_strategy(driver_, count);
       }
+    }
   );
-
   {
     ::aeron::Context aeronContext;
     aeronContext.aeronDir(driverPath_.cStr());
@@ -123,18 +127,18 @@ AeronRpc::AeronRpc() {
 }
 
 AeronRpc::~AeronRpc() noexcept {
-  running_.store(false);
-
+  {
+    auto running = running_.lockExclusive();
+    *running = false;
+  }
   if (runner_) {
     runner_ = nullptr;
   }
-
   if (driver_ && aeron_driver_close(driver_)) {
     auto errcode = aeron_errcode();
     auto errmsg = aeron_errmsg();
     KJ_LOG(ERROR, "aeron_driver_close", errcode, errmsg);
   }
-
   if (driverContext_ && aeron_driver_context_close(driverContext_)) {
     auto errcode = aeron_errcode();
     auto errmsg = aeron_errmsg();
@@ -192,7 +196,6 @@ TEST_F(AeronRpc, RpcService) {
   capnp::MallocMessageBuilder mb;
   auto vatId = mb.getRoot<capnp::rpc::twoparty::VatId>();
   vatId.setSide(capnp::rpc::twoparty::Side::SERVER);
-
   {
     auto server = rpcClient.bootstrap(vatId).castAs<Hello>();
     auto req = server.greetRequest();
