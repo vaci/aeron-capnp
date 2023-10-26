@@ -8,10 +8,54 @@
 #include "serialize.h"
 
 #include <capnp/serialize.h>
-
-#include <ImageControlledFragmentAssembler.h>
+#include <kj/list.h>
 
 namespace aeroncap {
+
+namespace {
+
+template <typename T>
+struct Queue {
+  Queue() {}
+
+  ~Queue() {
+    while (!empty()) {
+      pop();
+    }
+  }
+
+  bool empty() const {
+    return items.empty();
+  }
+
+  size_t size() const {
+    return items.size();
+  }
+  
+  void push(T&& element) {
+    auto entry = new Entry{ .item = kj::mv(element) };
+    items.add(*entry);
+  }
+
+  T pop() {
+    KJ_IREQUIRE(!empty());
+    auto& entry = items.front();
+    items.remove(entry);
+    auto item = kj::mv(entry.item);
+    delete &entry;
+    return item;
+  }
+
+private:
+  struct Entry {
+    kj::ListLink<Entry> link;
+    T item;
+  };
+
+  kj::List<Entry, &Entry::link> items;
+};
+
+}
 
 namespace _ {
 
@@ -36,7 +80,7 @@ struct ImageReceiver {
 
   std::shared_ptr<::aeron::Aeron> aeron_;
   uint64_t subId_;
-  kj::MutexGuarded<kj::Queue<::aeron::Image>> acceptQueue_;
+  kj::MutexGuarded<Queue<::aeron::Image>> acceptQueue_;
 };
 
 ImageReceiver::ImageReceiver(

@@ -3,7 +3,6 @@
 // Licensed under the Apache 2.0 license found in the LICENSE file or at:
 //     https://opensource.org/licenses/Apache-2.0
 
-#include "queue.h"
 #include "serialize.h"
 
 #include <capnp/capability.h>
@@ -14,8 +13,6 @@
 #include <kj/map.h>
 
 #include <Aeron.h>
-
-#include <queue>
 
 namespace aeroncap {
 
