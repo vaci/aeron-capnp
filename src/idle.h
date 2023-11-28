@@ -11,7 +11,7 @@
 namespace aeroncap {
 
 struct Idler {
-  virtual ~Idler() {}
+  virtual ~Idler() = default;
   virtual kj::Promise<void> idle() = 0;
   virtual void reset();
 };

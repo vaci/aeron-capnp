@@ -20,6 +20,16 @@ static int EKAM_TEST_DISABLE_INTERCEPTOR = 1;
 
 using namespace aeroncap;
 
+auto newAeronMessageStream(
+  ::aeron::ExclusivePublication& pub,
+  ::aeron::Image image,
+  kj::Timer& timer) {
+  auto readIdler = kj::attachVal(idle::periodic(timer, kj::NANOSECONDS));
+  auto writeIdler = kj::attachVal(idle::backoff(timer));
+  return kj::heap<AeronMessageStream>(pub, image, *readIdler, *writeIdler)
+    .attach(kj::mv(readIdler), kj::mv(writeIdler));
+}
+
 struct AeronRpc
   : testing::Test {
 
@@ -153,15 +163,15 @@ TEST_F(AeronRpc, Basic) {
   auto pubB = newPublisher(2);
   auto imageA = subA->imageByIndex(0);
   auto imageB = subB->imageByIndex(0);
-  auto msA = AeronMessageStream(*pubA, *imageB, timer_);
-  auto msB = AeronMessageStream(*pubB, *imageA, timer_);
+  auto msA = newAeronMessageStream(*pubA, *imageB, timer_);
+  auto msB = newAeronMessageStream(*pubB, *imageA, timer_);
 
   capnp::MallocMessageBuilder mb;
   auto data = mb.initRoot<capnp::Text>(16u);
   memset(data.begin(), 'a', data.size());
 
-  msA.writeMessage(nullptr, mb.getSegmentsForOutput()).wait(waitScope_);
-  auto msg = msB.readMessage().wait(waitScope_);
+  msA->writeMessage(nullptr, mb.getSegmentsForOutput()).wait(waitScope_);
+  auto msg = msB->readMessage().wait(waitScope_);
   auto txt = msg->getRoot<capnp::Text>();
   EXPECT_EQ(txt.size(), data.size());
 }
@@ -184,13 +194,13 @@ TEST_F(AeronRpc, RpcService) {
   auto pubB = newPublisher(2);
   auto imageA = subA->imageByIndex(0);
   auto imageB = subB->imageByIndex(0);
-  auto msA = AeronMessageStream(*pubA, *imageB, timer_);
-  auto msB = AeronMessageStream(*pubB, *imageA, timer_);
+  auto msA = newAeronMessageStream(*pubA, *imageB, timer_);
+  auto msB = newAeronMessageStream(*pubB, *imageA, timer_);
 
-  capnp::TwoPartyVatNetwork server{msB, capnp::rpc::twoparty::Side::SERVER};
+  capnp::TwoPartyVatNetwork server{*msB, capnp::rpc::twoparty::Side::SERVER};
   auto rpcServer = capnp::makeRpcServer(server, kj::heap<HelloServer>());
 
-  capnp::TwoPartyVatNetwork client{msA, capnp::rpc::twoparty::Side::CLIENT};
+  capnp::TwoPartyVatNetwork client{*msA, capnp::rpc::twoparty::Side::CLIENT};
   auto rpcClient = capnp::makeRpcClient(client);
 
   capnp::MallocMessageBuilder mb;

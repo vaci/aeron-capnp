@@ -11,7 +11,7 @@
 namespace aeroncap {
 
 kj::Promise<kj::Own<capnp::MessageReader>> readMessage(
-  kj::Timer&,
+  Idler&,
   ::aeron::Image image,
   capnp::ReaderOptions options = {}
 );
@@ -22,7 +22,8 @@ struct AeronMessageStream final
   AeronMessageStream(
     ::aeron::ExclusivePublication&,
     ::aeron::Image,
-    kj::Timer&
+    Idler& readIdler,
+    Idler& writeIdler
   );
 
   ~AeronMessageStream();
@@ -46,7 +47,8 @@ struct AeronMessageStream final
 private:
   ::aeron::ExclusivePublication& pub_;
   ::aeron::Image image_;
-  kj::Timer& timer_;
+  Idler& readIdler_;
+  Idler& writeIdler_;
 };
 
 }

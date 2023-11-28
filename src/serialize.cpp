@@ -15,11 +15,11 @@ namespace {
 
 template <typename Idler>
 kj::Promise<void> writeClaim(
-    ::aeron::ExclusivePublication& pub,			   
+    ::aeron::ExclusivePublication& pub,
     kj::ArrayPtr<kj::ArrayPtr<capnp::word const> const> segments,
     uint64_t byteSize,
-    Idler idler) {
-  
+    Idler& idler) {
+
   KJ_DREQUIRE(byteSize <= pub_.maxPayloadLength());
   KJ_DREQUIRE(byteSize > 0);
 
@@ -36,8 +36,8 @@ kj::Promise<void> writeClaim(
   }
   else if (err == ::aeron::BACK_PRESSURED || err == ::aeron::ADMIN_ACTION) {
     return idler.idle().then(
-      [&pub, segments, byteSize, idler = kj::mv(idler)]() mutable {
-	return writeClaim(pub, segments, byteSize, kj::mv(idler));
+      [&pub, segments, byteSize, &idler]() mutable {
+	return writeClaim(pub, segments, byteSize, idler);
       }
     );
   }
@@ -48,9 +48,9 @@ kj::Promise<void> writeClaim(
 
 template <typename Idler>
 kj::Promise<void> writeOffer(
-    ::aeron::ExclusivePublication& pub,			   
+    ::aeron::ExclusivePublication& pub,
     kj::ArrayPtr<capnp::byte> bytes,
-    Idler idler) {
+    Idler& idler) {
 
   KJ_DREQUIRE(bytes.size() <= pub.maxMessageLength());
   KJ_DREQUIRE(bytes.size > 0);
@@ -60,8 +60,8 @@ kj::Promise<void> writeOffer(
   }
   else if (err == ::aeron::BACK_PRESSURED || err == ::aeron::ADMIN_ACTION) {
     return idler.idle().then(
-      [&pub, bytes, idler = kj::mv(idler)]() mutable {
-	return writeOffer(pub, bytes, kj::mv(idler));
+      [&pub, bytes, &idler]() mutable {
+	return writeOffer(pub, bytes, idler);
       }
     );
   }
@@ -72,14 +72,14 @@ kj::Promise<void> writeOffer(
 
 template <typename Idler>
 kj::Promise<kj::Maybe<kj::Own<capnp::MessageReader>>> tryReadMessage(
-  Idler idler,
+  Idler& idler,
   ::aeron::Image image,
   capnp::ReaderOptions options,
   kj::ArrayPtr<capnp::word> scratchSpace = nullptr,
   kj::Own<kj::VectorOutputStream> outputStream = {}) {
 
   using Action = ::aeron::ControlledPollAction;
-   
+
   kj::Maybe<kj::Own<capnp::MessageReader>> reader;
 
   auto handler = [&, scratchSpace](auto& buffer, auto offset, auto length, auto& header) mutable {
@@ -94,13 +94,13 @@ kj::Promise<kj::Maybe<kj::Own<capnp::MessageReader>>> tryReadMessage(
       auto wordSize = (length+1)/sizeof(capnp::word);
 
       if (scratchSpace.size() < wordSize) {
-        ownedSpace = kj::heapArray<capnp::word>(wordSize);
-        scratchSpace = ownedSpace;
+	ownedSpace = kj::heapArray<capnp::word>(wordSize);
+	scratchSpace = ownedSpace;
       }
       memcpy(scratchSpace.begin(), buffer.buffer() + offset, length);
 
       reader = kj::heap<capnp::FlatArrayMessageReader>(scratchSpace, options)
-        .attach(kj::mv(ownedSpace));
+	.attach(kj::mv(ownedSpace));
       return Action::BREAK;
     }
 
@@ -109,7 +109,7 @@ kj::Promise<kj::Maybe<kj::Own<capnp::MessageReader>>> tryReadMessage(
     }
 
     outputStream->write(buffer.buffer() + offset, length);
-    
+
     if (isSet(frame::END_FRAG)) {
       auto inputStream = kj::heap<kj::ArrayInputStream>(outputStream->getArray());
       reader = kj::heap<capnp::InputStreamMessageReader>(*inputStream)
@@ -134,8 +134,8 @@ kj::Promise<kj::Maybe<kj::Own<capnp::MessageReader>>> tryReadMessage(
   }
 
   return idler.idle().then(
-    [idler = kj::mv(idler), image = kj::mv(image), options, scratchSpace, outputStream = kj::mv(outputStream)]() mutable {
-      return tryReadMessage(kj::mv(idler), kj::mv(image), options, scratchSpace, kj::mv(outputStream));
+    [&idler, image = kj::mv(image), options, scratchSpace, outputStream = kj::mv(outputStream)]() mutable {
+      return tryReadMessage(idler, kj::mv(image), options, scratchSpace, kj::mv(outputStream));
     }
   );
 }
@@ -143,11 +143,11 @@ kj::Promise<kj::Maybe<kj::Own<capnp::MessageReader>>> tryReadMessage(
 }
 
 kj::Promise<kj::Own<capnp::MessageReader>> readMessage(
-  kj::Timer& timer,
+  Idler& idler,
   ::aeron::Image image,
   capnp::ReaderOptions options) {
 
-  return tryReadMessage(idle::periodic(timer, kj::NANOSECONDS), kj::mv(image), options)
+  return tryReadMessage(idler, kj::mv(image), options)
     .then(
       [](auto maybeReader) -> kj::Promise<kj::Own<capnp::MessageReader>> {
 	auto& reader = KJ_UNWRAP_OR_RETURN(maybeReader, KJ_EXCEPTION(DISCONNECTED));
@@ -159,10 +159,12 @@ kj::Promise<kj::Own<capnp::MessageReader>> readMessage(
 AeronMessageStream::AeronMessageStream(
   ::aeron::ExclusivePublication& pub,
   ::aeron::Image image,
-  kj::Timer& timer)
+  Idler& readIdler,
+  Idler& writeIdler)
   : pub_{pub}
   , image_{kj::mv(image)}
-  , timer_{timer} {
+  , readIdler_{readIdler}
+  , writeIdler_{writeIdler} {
 }
 
 AeronMessageStream::~AeronMessageStream() {
@@ -175,7 +177,7 @@ kj::Promise<kj::Maybe<capnp::MessageReaderAndFds>> AeronMessageStream::tryReadMe
     capnp::ReaderOptions options,
     kj::ArrayPtr<capnp::word> scratchSpace) {
 
-  return aeroncap::tryReadMessage(idle::backoff(timer_), image_, options, scratchSpace).then(
+  return aeroncap::tryReadMessage(readIdler_, image_, options, scratchSpace).then(
       [](auto maybeReader) -> kj::Maybe<capnp::MessageReaderAndFds> {
 	auto& reader = KJ_UNWRAP_OR_RETURN(maybeReader, nullptr);
 	return capnp::MessageReaderAndFds{kj::mv(reader), nullptr};
@@ -204,12 +206,12 @@ kj::Promise<void> AeronMessageStream::writeMessage(
   KJ_DREQUIRE(byteSize <= pub_.maxMessageLength());
 
   if (byteSize <= pub_.maxPayloadLength()) {
-    return writeClaim(pub_, segments, byteSize, idle::backoff(timer_));
+    return writeClaim(pub_, segments, byteSize, writeIdler_);
   }
   else {
     auto words = capnp::messageToFlatArray(segments);
-    return writeOffer(pub_, words.asBytes(), idle::backoff(timer_)).attach(kj::mv(words));
-  } 
+    return writeOffer(pub_, words.asBytes(), writeIdler_).attach(kj::mv(words));
+  }
 }
 
 kj::Promise<void> AeronMessageStream::end() {

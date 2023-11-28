@@ -69,14 +69,14 @@ struct ImageReceiver {
   ~ImageReceiver();
 
   template <typename Idler>
-  kj::Promise<::aeron::Image> receive(Idler idler) {
+  kj::Promise<::aeron::Image> receive(Idler& idler) {
     auto queue = acceptQueue_.lockExclusive();
     if (!queue->empty()) {
       return queue->pop();
     }
     return idler.idle()
-      .then([this, idler = kj::mv(idler)]{
-	return receive(kj::mv(idler));
+      .then([this, &idler]{
+	return receive(idler);
       });
   }
 
@@ -89,7 +89,7 @@ ImageReceiver::ImageReceiver(
   ::aeron::Aeron& aeron,
   kj::StringPtr channel,
   int32_t streamId) {
-  
+
   subId_ = aeron.addSubscription(
     channel.cStr(),
     streamId,
@@ -112,14 +112,14 @@ template <typename Idler>
 kj::Promise<void> offerMessage(
     ::aeron::ExclusivePublication& pub,
     kj::ArrayPtr<capnp::byte> bytes,
-    Idler idler) {
+    Idler& idler) {
 
   if (auto err = pub.offer({bytes.begin(), bytes.size()}); err > 0) {
     return kj::READY_NOW;
   }
   else if (err == ::aeron::ADMIN_ACTION || err == ::aeron::BACK_PRESSURED) {
-    return idler.idle().then([&pub, bytes, idler = kj::mv(idler)] {
-      return offerMessage(pub, bytes, kj::mv(idler));
+    return idler.idle().then([&pub, bytes, &idler] {
+      return offerMessage(pub, bytes, idler);
     });
   }
   else {
@@ -130,30 +130,30 @@ kj::Promise<void> offerMessage(
 template <typename Idler>
 kj::Promise<void> offerMessage(
   ::aeron::ExclusivePublication& pub,
-  capnp::MessageBuilder& mb, Idler idler) {
+  capnp::MessageBuilder& mb, Idler& idler) {
   auto words = capnp::messageToFlatArray(mb);
   auto bytes = words.asBytes();
-  return offerMessage(pub, bytes, kj::mv(idler)).attach(kj::mv(words));
+  return offerMessage(pub, bytes, idler).attach(kj::mv(words));
 }
 
 template <typename Idler>
 kj::Promise<std::shared_ptr<::aeron::ExclusivePublication>> findPublication(
-  ::aeron::Aeron& aeron, int32_t pubId, Idler idler) {
+  ::aeron::Aeron& aeron, int32_t pubId, Idler& idler) {
 
   if (auto pub = aeron.findExclusivePublication(pubId)) {
     return pub;
   }
 
-  return idler.idle().then([&aeron, pubId, idler = kj::mv(idler)]() mutable {
-    return findPublication(aeron, pubId, kj::mv(idler));
+  return idler.idle().then([&aeron, pubId, &idler]() mutable {
+    return findPublication(aeron, pubId, idler);
   });
 }
 
 template <typename Idler>
 kj::Promise<std::shared_ptr<::aeron::ExclusivePublication>> addPublication(
-  ::aeron::Aeron& aeron, kj::StringPtr channel, int32_t streamId, Idler idle) {
+  ::aeron::Aeron& aeron, kj::StringPtr channel, int32_t streamId, Idler& idler) {
   auto pubId = aeron.addExclusivePublication(channel.cStr(), streamId);
-  return findPublication(aeron, pubId, kj::mv(idle));
+  return findPublication(aeron, pubId, idler);
 }
 
 }
@@ -179,17 +179,18 @@ Connector::~Connector() {
 }
 
 kj::Promise<void> Connector::handleResponses() {
-  return receiver_->receive(idle::periodic(timer_))
+  auto idler = kj::attachVal(idle::backoff(timer_));
+  return receiver_->receive(*idler).attach(kj::mv(idler))
     .then(
-      [this](auto image) {
+      [this](auto image) -> kj::Promise<void> {
 	KJ_LOG(INFO, image.sourceIdentity(), image.sessionId());
-	return readMessage(timer_, image)
+	auto idler = kj::attachVal(idle::backoff(timer_));
+	return readMessage(*idler, image).attach(kj::mv(idler))
 	  .then(
 	    [this, image = kj::mv(image)](auto reader) mutable {
 	      auto ack = reader->template getRoot<aeron::Ack>();
 	      auto sessionId = ack.getSessionId();
 	      KJ_LOG(INFO, "Connector < ACK", sessionId);
-                  
 	      KJ_IF_MAYBE(f, fulfillers_.find(sessionId)) {
 		(*f)->fulfill(kj::mv(image));
 		fulfillers_.erase(sessionId);
@@ -209,11 +210,6 @@ kj::Promise<void> Connector::handleResponses() {
     )
     .then(
       [this] {
-	return timer_.afterDelay(kj::MICROSECONDS*100);
-      }
-    )
-    .then(
-      [this] {
 	return handleResponses();
       }
     );
@@ -225,28 +221,30 @@ void Connector::taskFailed(kj::Exception&& exc) {
 
 kj::Promise<kj::Own<AeronMessageStream>> Connector::connect(
     kj::StringPtr channel, int32_t streamId) {
-  
-  return addPublication(*aeron_, channel, streamId, idle::backoff(timer_))
+  auto idler = kj::attachVal(idle::backoff(timer_));
+  return addPublication(*aeron_, channel, streamId, *idler).attach(kj::mv(idler))
     .then(
       [this](auto pub) {
 	auto sessionId = pub->sessionId();
 	auto paf = kj::newPromiseAndFulfiller<::aeron::Image>();
 	fulfillers_.insert(sessionId, kj::mv(paf.fulfiller));
-                  
+
 	capnp::MallocMessageBuilder mb{capnp::sizeInWords<aeron::Syn>()};
 	auto syn = mb.initRoot<aeron::Syn>();
 	syn.setChannel(channel_);
 	syn.setStreamId(streamId_);
 	KJ_LOG(INFO, "Connector > SYN", channel_, streamId_);
-
-	return offerMessage(*pub, mb, idle::backoff(timer_))
+	auto idler = kj::attachVal(idle::backoff(timer_));
+	return offerMessage(*pub, mb, *idler).attach(kj::mv(idler))
 	  .then(
 	    [this, pub = kj::mv(pub), promise = kj::mv(paf.promise)]() mutable {
 	      return promise.then(
 		[this, pub = kj::mv(pub)](auto image) {
+		  auto readIdler = kj::attachVal(idle::periodic(timer_, kj::NANOSECONDS));
+		  auto writeIdler = kj::attachVal(idle::backoff(timer_));
 		  return kj::heap<AeronMessageStream>(
-		    *pub, kj::mv(image), timer_
-		  ).attach(kj::mv(pub));
+		    *pub, kj::mv(image), *readIdler, *writeIdler
+		  ).attach(kj::mv(pub), kj::mv(readIdler), kj::mv(writeIdler));
 		}
 	      );
 	    }
@@ -266,19 +264,22 @@ Listener::Listener(
 }
 
 kj::Promise<kj::Own<AeronMessageStream>> Listener::accept() {
-  return receiver_->receive(idle::periodic(timer_))
+  auto idler = kj::attachVal(idle::backoff(timer_));
+  return receiver_->receive(*idler).attach(kj::mv(idler))
     .then(
       [this](auto image) mutable {
 	KJ_LOG(INFO, image.sourceIdentity(), image.sessionId());
-	return readMessage(timer_, image)
+	auto idler = kj::attachVal(idle::backoff(timer_));
+	return readMessage(*idler, image).attach(kj::mv(idler))
 	  .then(
 	    [this](auto reader) mutable {
 	      auto syn = reader->template getRoot<aeron::Syn>();
 	      auto channel = syn.getChannel();
 	      auto streamId = syn.getStreamId();
 	      KJ_LOG(INFO, "Listener < SYN", channel, streamId);
-	      return addPublication(*aeron_, channel, streamId, idle::backoff(timer_));
- 	    }
+	      auto idler = kj::attachVal(idle::backoff(timer_));
+	      return addPublication(*aeron_, channel, streamId, *idler).attach(kj::mv(idler));
+	    }
 	  )
 	  .then(
 	    [this, image = kj::mv(image)](auto pub) mutable {
@@ -289,12 +290,15 @@ kj::Promise<kj::Own<AeronMessageStream>> Listener::accept() {
 	      auto ack = mb.initRoot<aeron::Ack>();
 	      ack.setSessionId(sessionId);
 
-	      return offerMessage(*pub, mb, idle::backoff(timer_))
+	      auto idler = kj::attachVal(idle::backoff(timer_));
+	      return offerMessage(*pub, mb, *idler).attach(kj::mv(idler))
 		.then(
 		  [this, pub = kj::mv(pub), image = kj::mv(image)]() mutable {
+		    auto readIdler = kj::attachVal(idle::periodic(timer_, kj::NANOSECONDS));
+		    auto writeIdler = kj::attachVal(idle::backoff(timer_));
 		    return kj::heap<AeronMessageStream>(
-		      *pub, kj::mv(image), timer_
-		    ).attach(kj::mv(pub));
+		      *pub, kj::mv(image), *readIdler, *writeIdler
+		    ).attach(kj::mv(pub), kj::mv(readIdler), kj::mv(writeIdler));
 		  }
 		);
 	    }
@@ -343,10 +347,10 @@ void TwoPartyServer::accept(kj::Own<AeronMessageStream> connection) {
 kj::Promise<void> TwoPartyServer::listen(Listener& listener) {
   return listener.accept()
     .then(
-        [this, &listener](auto connection) mutable {
-          accept(kj::mv(connection));
-          return listen(listener);
-        }
+      [this, &listener](auto connection) mutable {
+	accept(kj::mv(connection));
+	return listen(listener);
+      }
     );
 }
 
