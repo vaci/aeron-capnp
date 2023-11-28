@@ -10,37 +10,86 @@
 
 namespace aeroncap {
 
-using Idler = kj::Function<kj::Promise<void>()>;
-  
+struct Idler {
+  virtual ~Idler() {}
+  virtual kj::Promise<void> idle() = 0;
+  virtual void reset();
+};
+
 namespace idle {
 
 inline auto backoff(
   kj::Timer& timer,
   kj::Duration delay = kj::NANOSECONDS,
-  uint64_t count = 16, // 65.536μs
-  uint64_t spin = 3) {
+  uint16_t count = 16, // 65.536μs
+  uint16_t spin = 3) {
 
-  return [&timer, delay, count, spin]() mutable -> kj::Promise<void> {
-    if (spin) {
-      --spin;
-      return kj::evalLater([]{});
+  struct BackoffIdler
+    : Idler {
+
+    BackoffIdler(kj::Timer& timer, kj::Duration delay, uint16_t count, uint16_t spin)
+      : timer_{timer}
+      , delay_{delay}
+      , count_{count}
+      , spin_{spin} {
+      reset();
     }
 
-    auto promise = timer.afterDelay(delay);
-    if (count) {
-      --count;
-      delay *= 2;
+    kj::Promise<void> idle() override {
+      if (currentSpin_) {
+	--currentSpin_;
+	return kj::evalLater([]{});
+      }
+      auto promise = timer_.afterDelay(currentDelay_);
+      if (currentCount_) {
+	--currentCount_;
+	currentDelay_ *= 2;
+      }
+      return promise;
     }
-    return promise;
+
+    void reset() override {
+      currentDelay_ = delay_;
+      currentCount_ = count_;
+      currentSpin_ = spin_;
+    }
+
+    kj::Timer& timer_;
+    kj::Duration delay_;
+    uint16_t count_;
+    uint16_t spin_;
+    uint16_t currentCount_;
+    uint16_t currentSpin_;
+    kj::Duration currentDelay_;
   };
+
+  return BackoffIdler{timer, delay, count, spin};
 }
 
 inline auto yield(uint64_t count = kj::maxValue) {
-  return [count]() mutable -> kj::Promise<void> {
-    if (count == 0) return KJ_EXCEPTION(OVERLOADED);
-    --count;
-    return kj::evalLast([]{});
+
+  struct YieldIdler
+    : Idler {
+
+    YieldIdler(uint64_t count)
+      : count_{count} {
+      reset();
+    }
+
+    kj::Promise<void> idle() override {
+      if (currentCount_ == 0) return KJ_EXCEPTION(OVERLOADED);
+      --currentCount_;
+      return kj::evalLast([]{});
+    }
+
+    void reset() override {
+      currentCount_ = count_;
+    }
+
+    uint64_t count_;
+    uint64_t currentCount_;
   };
+  return YieldIdler{count};
 }
 
 inline auto periodic(
@@ -48,11 +97,32 @@ inline auto periodic(
   kj::Duration period = kj::MILLISECONDS,
   uint64_t count = kj::maxValue) {
 
-  return [&timer, period, count]() mutable -> kj::Promise<void> {
-    if (count == 0) return KJ_EXCEPTION(OVERLOADED);
-    --count;
-    return timer.afterDelay(period);
+  struct PeriodicIdler
+    : Idler {
+
+    PeriodicIdler(kj::Timer& timer, kj::Duration period, uint64_t count)
+      : timer_{timer}
+      , period_{period}
+      , count_{count} {
+      reset();
+    }
+
+    kj::Promise<void> idle() override {
+      if (currentCount_ == 0) return KJ_EXCEPTION(OVERLOADED);
+      currentCount_--;
+      return timer_.afterDelay(period_);
+    }
+
+    void reset() override {
+      currentCount_ = count_;
+    }
+
+    kj::Timer& timer_;
+    kj::Duration period_;
+    uint64_t count_;
+    uint64_t currentCount_;
   };
+  return PeriodicIdler{timer, period, count};
 }
 
 }

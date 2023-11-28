@@ -2,4 +2,8 @@
 
 namespace aeroncap {
 
+void Idler::reset()
+{
+}
+
 }

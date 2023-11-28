@@ -153,8 +153,8 @@ TEST_F(AeronRpc, Basic) {
   auto pubB = newPublisher(2);
   auto imageA = subA->imageByIndex(0);
   auto imageB = subB->imageByIndex(0);
-  auto msA = AeronMessageStream(pubA, *imageB, timer_);
-  auto msB = AeronMessageStream(pubB, *imageA, timer_);
+  auto msA = AeronMessageStream(*pubA, *imageB, timer_);
+  auto msB = AeronMessageStream(*pubB, *imageA, timer_);
 
   capnp::MallocMessageBuilder mb;
   auto data = mb.initRoot<capnp::Text>(16u);
@@ -184,8 +184,8 @@ TEST_F(AeronRpc, RpcService) {
   auto pubB = newPublisher(2);
   auto imageA = subA->imageByIndex(0);
   auto imageB = subB->imageByIndex(0);
-  auto msA = AeronMessageStream(pubA, *imageB, timer_);
-  auto msB = AeronMessageStream(pubB, *imageA, timer_);
+  auto msA = AeronMessageStream(*pubA, *imageB, timer_);
+  auto msB = AeronMessageStream(*pubB, *imageA, timer_);
 
   capnp::TwoPartyVatNetwork server{msB, capnp::rpc::twoparty::Side::SERVER};
   auto rpcServer = capnp::makeRpcServer(server, kj::heap<HelloServer>());

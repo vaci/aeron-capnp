@@ -3,6 +3,9 @@
 // Licensed under the Apache 2.0 license found in the LICENSE file or at:
 //     https://opensource.org/licenses/Apache-2.0
 
+// RPC connectivity using Capnproto messages to perform the initial handshaking.
+// See https://aeron.io/docs/step-by-step-rpc-server/requirements-overview/
+
 #include "serialize.h"
 
 #include <capnp/capability.h>

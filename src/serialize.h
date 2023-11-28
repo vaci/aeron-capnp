@@ -10,31 +10,20 @@
 
 namespace aeroncap {
 
-  kj::Promise<kj::Own<capnp::MessageReader>> readMessage(
-    kj::Timer&,
-    ::aeron::Image image,
-    capnp::ReaderOptions options = {}
-  );
+kj::Promise<kj::Own<capnp::MessageReader>> readMessage(
+  kj::Timer&,
+  ::aeron::Image image,
+  capnp::ReaderOptions options = {}
+);
 
-  struct AeronMessageStream final
+struct AeronMessageStream final
   : capnp::MessageStream {
 
   AeronMessageStream(
-    std::shared_ptr<::aeron::ExclusivePublication>,
+    ::aeron::ExclusivePublication&,
     ::aeron::Image,
-    kj::Function<Idler()> idlerFactory
+    kj::Timer&
   );
-
-  AeronMessageStream(
-    std::shared_ptr<::aeron::ExclusivePublication> pub,
-    ::aeron::Image image,
-    kj::Timer& timer)
-    : AeronMessageStream{
-	kj::mv(pub),
-	kj::mv(image),
-	[&timer]{ return idle::backoff(timer); }
-      } {
-  }
 
   ~AeronMessageStream();
 
@@ -55,9 +44,9 @@ namespace aeroncap {
   kj::Maybe<int> getSendBufferSize() override;
 
 private:
-  std::shared_ptr<::aeron::ExclusivePublication> pub_;
+  ::aeron::ExclusivePublication& pub_;
   ::aeron::Image image_;
-  kj::Function<Idler()> idlerFactory_;
+  kj::Timer& timer_;
 };
 
 }

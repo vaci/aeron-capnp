@@ -69,13 +69,15 @@ struct ImageReceiver {
   ~ImageReceiver();
 
   template <typename Idler>
-  kj::Promise<::aeron::Image> receive(Idler idle) {
+  kj::Promise<::aeron::Image> receive(Idler idler) {
     auto queue = acceptQueue_.lockExclusive();
     if (!queue->empty()) {
       return queue->pop();
     }
-    return idle()
-      .then([this, idle = kj::mv(idle)]{ return receive(kj::mv(idle)); });
+    return idler.idle()
+      .then([this, idler = kj::mv(idler)]{
+	return receive(kj::mv(idler));
+      });
   }
 
   std::shared_ptr<::aeron::Aeron> aeron_;
@@ -116,7 +118,7 @@ kj::Promise<void> offerMessage(
     return kj::READY_NOW;
   }
   else if (err == ::aeron::ADMIN_ACTION || err == ::aeron::BACK_PRESSURED) {
-    return idler().then([&pub, bytes, idler = kj::mv(idler)] {
+    return idler.idle().then([&pub, bytes, idler = kj::mv(idler)] {
       return offerMessage(pub, bytes, kj::mv(idler));
     });
   }
@@ -136,14 +138,14 @@ kj::Promise<void> offerMessage(
 
 template <typename Idler>
 kj::Promise<std::shared_ptr<::aeron::ExclusivePublication>> findPublication(
-  ::aeron::Aeron& aeron, int32_t pubId, Idler idle) {
+  ::aeron::Aeron& aeron, int32_t pubId, Idler idler) {
 
   if (auto pub = aeron.findExclusivePublication(pubId)) {
     return pub;
   }
 
-  return idle().then([&aeron, pubId, idle = kj::mv(idle)]() mutable {
-    return findPublication(aeron, pubId, kj::mv(idle));
+  return idler.idle().then([&aeron, pubId, idler = kj::mv(idler)]() mutable {
+    return findPublication(aeron, pubId, kj::mv(idler));
   });
 }
 
@@ -243,8 +245,8 @@ kj::Promise<kj::Own<AeronMessageStream>> Connector::connect(
 	      return promise.then(
 		[this, pub = kj::mv(pub)](auto image) {
 		  return kj::heap<AeronMessageStream>(
-		    kj::mv(pub), kj::mv(image), timer_
-		  );
+		    *pub, kj::mv(image), timer_
+		  ).attach(kj::mv(pub));
 		}
 	      );
 	    }
@@ -291,8 +293,8 @@ kj::Promise<kj::Own<AeronMessageStream>> Listener::accept() {
 		.then(
 		  [this, pub = kj::mv(pub), image = kj::mv(image)]() mutable {
 		    return kj::heap<AeronMessageStream>(
-		      kj::mv(pub), kj::mv(image), timer_
-		    );
+		      *pub, kj::mv(image), timer_
+		    ).attach(kj::mv(pub));
 		  }
 		);
 	    }

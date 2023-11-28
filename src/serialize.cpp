@@ -18,7 +18,7 @@ kj::Promise<void> writeClaim(
     ::aeron::ExclusivePublication& pub,			   
     kj::ArrayPtr<kj::ArrayPtr<capnp::word const> const> segments,
     uint64_t byteSize,
-    Idler idle) {
+    Idler idler) {
   
   KJ_DREQUIRE(byteSize <= pub_.maxPayloadLength());
   KJ_DREQUIRE(byteSize > 0);
@@ -35,9 +35,9 @@ kj::Promise<void> writeClaim(
     return kj::READY_NOW;
   }
   else if (err == ::aeron::BACK_PRESSURED || err == ::aeron::ADMIN_ACTION) {
-    return idle().then(
-      [&pub, segments, byteSize, idle = kj::mv(idle)]() mutable {
-	return writeClaim(pub, segments, byteSize, kj::mv(idle));
+    return idler.idle().then(
+      [&pub, segments, byteSize, idler = kj::mv(idler)]() mutable {
+	return writeClaim(pub, segments, byteSize, kj::mv(idler));
       }
     );
   }
@@ -50,7 +50,7 @@ template <typename Idler>
 kj::Promise<void> writeOffer(
     ::aeron::ExclusivePublication& pub,			   
     kj::ArrayPtr<capnp::byte> bytes,
-    Idler idle) {
+    Idler idler) {
 
   KJ_DREQUIRE(bytes.size() <= pub.maxMessageLength());
   KJ_DREQUIRE(bytes.size > 0);
@@ -59,9 +59,9 @@ kj::Promise<void> writeOffer(
     return kj::READY_NOW;
   }
   else if (err == ::aeron::BACK_PRESSURED || err == ::aeron::ADMIN_ACTION) {
-    return idle().then(
-      [&pub, bytes, idle = kj::mv(idle)]() mutable {
-	return writeOffer(pub, bytes, kj::mv(idle));
+    return idler.idle().then(
+      [&pub, bytes, idler = kj::mv(idler)]() mutable {
+	return writeOffer(pub, bytes, kj::mv(idler));
       }
     );
   }
@@ -128,11 +128,12 @@ kj::Promise<kj::Maybe<kj::Own<capnp::MessageReader>>> tryReadMessage(
   if (KJ_UNLIKELY(image.isEndOfStream())) {
     return nullptr;
   }
-  
-  auto waiter = fragmentsRead ? kj::evalLater([]{}) : idler();
-  // if we read a fragment, try again immediately
 
-  return waiter.then(
+  if (fragmentsRead) {
+    idler.reset();
+  }
+
+  return idler.idle().then(
     [idler = kj::mv(idler), image = kj::mv(image), options, scratchSpace, outputStream = kj::mv(outputStream)]() mutable {
       return tryReadMessage(kj::mv(idler), kj::mv(image), options, scratchSpace, kj::mv(outputStream));
     }
@@ -156,16 +157,16 @@ kj::Promise<kj::Own<capnp::MessageReader>> readMessage(
 }
 
 AeronMessageStream::AeronMessageStream(
-  std::shared_ptr<::aeron::ExclusivePublication> pub,
+  ::aeron::ExclusivePublication& pub,
   ::aeron::Image image,
-  kj::Function<Idler()> idlerFactory)
-  : pub_{kj::mv(pub)}
+  kj::Timer& timer)
+  : pub_{pub}
   , image_{kj::mv(image)}
-  , idlerFactory_{kj::mv(idlerFactory)} {
+  , timer_{timer} {
 }
 
 AeronMessageStream::~AeronMessageStream() {
-  pub_->close();
+  pub_.close();
   image_.close();
 }
 
@@ -174,7 +175,7 @@ kj::Promise<kj::Maybe<capnp::MessageReaderAndFds>> AeronMessageStream::tryReadMe
     capnp::ReaderOptions options,
     kj::ArrayPtr<capnp::word> scratchSpace) {
 
-  return aeroncap::tryReadMessage(idlerFactory_(), image_, options, scratchSpace).then(
+  return aeroncap::tryReadMessage(idle::backoff(timer_), image_, options, scratchSpace).then(
       [](auto maybeReader) -> kj::Maybe<capnp::MessageReaderAndFds> {
 	auto& reader = KJ_UNWRAP_OR_RETURN(maybeReader, nullptr);
 	return capnp::MessageReaderAndFds{kj::mv(reader), nullptr};
@@ -200,24 +201,24 @@ kj::Promise<void> AeronMessageStream::writeMessage(
   auto byteSize = wordSize * sizeof(capnp::word);
 
   KJ_DREQUIRE(byteSize > 0);
-  KJ_DREQUIRE(byteSize <= pub_->maxMessageLength());
+  KJ_DREQUIRE(byteSize <= pub_.maxMessageLength());
 
-  if (byteSize <= pub_->maxPayloadLength()) {
-    return writeClaim(*pub_, segments, byteSize, idlerFactory_());
+  if (byteSize <= pub_.maxPayloadLength()) {
+    return writeClaim(pub_, segments, byteSize, idle::backoff(timer_));
   }
   else {
     auto words = capnp::messageToFlatArray(segments);
-    return writeOffer(*pub_, words.asBytes(), idlerFactory_()).attach(kj::mv(words));
+    return writeOffer(pub_, words.asBytes(), idle::backoff(timer_)).attach(kj::mv(words));
   } 
 }
 
 kj::Promise<void> AeronMessageStream::end() {
-  pub_->close();
+  pub_.close();
   return kj::READY_NOW;
 }
 
 kj::Maybe<int> AeronMessageStream::getSendBufferSize() {
-  return pub_->termBufferLength();
+  return pub_.termBufferLength();
 }
 
 }
